@@ -1,0 +1,8 @@
+version: 0.2
+
+phases:
+  post-build:
+    post_build:
+      commands:
+        - aws s3 cp app s3://$UPLOAD_BUCKET --recursive --acl public-read
+        - aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths '/*'

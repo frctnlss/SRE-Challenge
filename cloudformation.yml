@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  HostedZoneDomain:
+    Description: The domain to create a hosted zone from
+    Type: String
+    Default: example.com
+
+Resources:
+
+  ################### Routing ###################
+
+  HostedZone:
+    DeletionPolicy: Retain
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: $Ref HostedZoneDomain
+
+  CloudFrontTlsCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref HostedZoneDomain
+      DomainValidationOptions:
+        - DomainName: !Sub '*.${HostedZoneDomain}'
+          HostedZoneId: !Ref HostedZone
+      ValidationMethod: DNS
+
+  CloudFrontDNS:
+    DependsOn: CloudFrontDistribution
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub "${HostedZoneDomain}."
+      Comment: Zone apex alias targeted to an application load balancer.
+      RecordSets:
+        - Name: !Sub "${HostedZoneDomain}"
+          Type: A
+          AliasTarget:
+            HostedZoneId: !Ref HostedZone
+            DNSName: !GetAtt CloudFrontDistribution.DomainName
+
+  ################### CloudFront ###################
+
+  CloudFrontBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: cloudfront-file-store
+      WebsiteConfiguration:
+        IndexDocument: index.html
+    DeletionPolicy: Delete
+
+  CloudFrontBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudFrontBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AccessToStaticHosting
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+            Action: "s3:GetObject"
+            Resource:
+              !Join [ "/", [ !ImportValue Gingersnap-Frontend-Bucket-Arn, "*" ] ]
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "identity for cloudfront"
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref HostedZoneDomain
+        Origins:
+          - DomainName: cloudfront-file-store
+            Id: bucketOrigin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+        Enabled: true
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontTlsCertificate
+          MinimumProtocolVersion: "TLSv1.2_2018"
+          SslSupportMethod: "sni-only"
+
+  ################### CodeBuild ###################
+
+  CodeBuildRole:
+    DependsOn: CloudFrontDistribution
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodeBuildRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudfrontCacheInvalidate
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Effect: Allow
+              Action:
+                - cloudfront:CreateInvalidation
+              Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: ./buildspec.yaml
+      Name: CloudFront Deployment
+      Description: builds the frontend and deploys it S3
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        EnvironmentVariables:
+          - Name: "UPLOAD_BUCKET"
+            Value: !Ref CloudFrontBucket
+          - Name: "DISTRIBUTION_ID"
+            Value: !Ref CloudFrontDistribution
+
+  ################### CodePipeline ###################
+
+  CodePipelineArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: codepipeline-artifact-store
+
+  CodePipelineRole:
+    DependsOn: CloudFrontBucket
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodePipelineRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: S3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:*" #Todo: Replace least needed
+                Resource: !GetAtt CloudFrontBucket.Arn
+
+  ProjectPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: SRE-Pipeline
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      RestartExecutionOnUpdate: true
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue Gingersnap-CodePipeline-Bucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: "1"
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                Branch: master
+                Owner: frctnlss
+                Repo: SRE-Challenge
+                PollForSourceChanges: true
+        - Name: Deploy
+          Actions:
+            - Name: CloudFront Deployment
+              InputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuild
+
+
