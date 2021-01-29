@@ -134,7 +134,7 @@ to $54.10 if going with the EC2 option.
 * CloudFormation up to 1000 operations
 * CodePipeline up to one active pipeline
 * CodeBuild up to 100 minutes of build time
-* [Code Deploy](https://aws.amazon.com/waf/pricing/)
+* Code Deploy included with cloud resources
 * Docker up to 200 pulls
 * [ECR](https://aws.amazon.com/ecr/pricing/) est $0.10
 * ECS included with use of fargate
