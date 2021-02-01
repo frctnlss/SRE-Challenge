@@ -129,7 +129,7 @@ Resources:
                 Action:
                   - logs:*
                 Resource: "*"
-        - PolicyName: S3
+        - PolicyName: S3CodePipeline
           PolicyDocument:
             Version: 2012-10-17
             Statement:
@@ -139,6 +139,16 @@ Resources:
                 Resource: !Sub
                   - ${BUCKET}/*
                   - BUCKET: !GetAtt CodePipelineArtifactStoreBucket.Arn 
+        - PolicyName: S3CloudFront
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:* #Todo: Replace least needed
+                Resource: !Sub
+                  - ${BUCKET}/*
+                  - BUCKET: !GetAtt CloudFrontBucket.Arn
 
   CodeBuild:
     Type: AWS::CodeBuild::Project
@@ -201,6 +211,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
                 Resource: !GetAtt CodeBuild.Arn
 
   ProjectPipeline:
@@ -227,7 +238,7 @@ Resources:
                 Branch: main
                 Owner: frctnlss
                 Repo: SRE-Challenge
-                OAuthToken: 25035df6be4b85173d48fbd00f005bc2354ce72e
+                OAuthToken: 21a2ae662953f336a0291fa405cc19726878af4c
                 PollForSourceChanges: true
         - Name: Deploy
           Actions:
