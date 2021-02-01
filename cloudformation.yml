@@ -1,42 +1,42 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
-Parameters:
-  HostedZoneDomain:
-    Description: The domain to create a hosted zone from
-    Type: String
-    Default: example.com
+#Parameters:
+#  HostedZoneDomain:
+#    Description: The domain to create a hosted zone from
+#    Type: String
+#    Default: example.com
 
 Resources:
 
   ################### Routing ###################
 
-  HostedZone:
-    DeletionPolicy: Retain
-    Type: AWS::Route53::HostedZone
-    Properties:
-      Name: $Ref HostedZoneDomain
+#  HostedZone:
+#    DeletionPolicy: Retain
+#    Type: AWS::Route53::HostedZone
+#    Properties:
+#      Name: $Ref HostedZoneDomain
 
-  CloudFrontTlsCertificate:
-    Type: AWS::CertificateManager::Certificate
-    Properties:
-      DomainName: !Ref HostedZoneDomain
-      DomainValidationOptions:
-        - DomainName: !Sub '*.${HostedZoneDomain}'
-          HostedZoneId: !Ref HostedZone
-      ValidationMethod: DNS
+#  CloudFrontTlsCertificate:
+#    Type: AWS::CertificateManager::Certificate
+#    Properties:
+#      DomainName: !Ref HostedZoneDomain
+#      DomainValidationOptions:
+#        - DomainName: !Sub '*.${HostedZoneDomain}'
+#          HostedZoneId: !Ref HostedZone
+#      ValidationMethod: DNS
 
-  CloudFrontDNS:
-    DependsOn: CloudFrontDistribution
-    Type: AWS::Route53::RecordSetGroup
-    Properties:
-      HostedZoneName: !Sub "${HostedZoneDomain}."
-      Comment: Zone apex alias targeted to an application load balancer.
-      RecordSets:
-        - Name: !Sub "${HostedZoneDomain}"
-          Type: A
-          AliasTarget:
-            HostedZoneId: !Ref HostedZone
-            DNSName: !GetAtt CloudFrontDistribution.DomainName
+#  CloudFrontDNS:
+#    DependsOn: CloudFrontDistribution
+#    Type: AWS::Route53::RecordSetGroup
+#    Properties:
+#      HostedZoneName: !Sub "${HostedZoneDomain}."
+#      Comment: Zone apex alias targeted to an application load balancer.
+#      RecordSets:
+#        - Name: !Sub "${HostedZoneDomain}"
+#          Type: A
+#          AliasTarget:
+#            HostedZoneId: !Ref HostedZone
+#            DNSName: !GetAtt CloudFrontDistribution.DomainName
 
   ################### CloudFront ###################
 
@@ -60,8 +60,9 @@ Resources:
             Principal:
               CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
             Action: "s3:GetObject"
-            Resource:
-              !Join [ "/", [ !ImportValue Gingersnap-Frontend-Bucket-Arn, "*" ] ]
+            Resource: !Sub
+              - ${BUCKET}/*
+              - BUCKET: !GetAtt CloudFrontBucket.Arn
 
   CloudFrontOriginAccessIdentity:
     Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
@@ -70,23 +71,29 @@ Resources:
         Comment: "identity for cloudfront"
 
   CloudFrontDistribution:
+    DependsOn: CloudFrontBucket
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
-        Aliases:
-          - !Ref HostedZoneDomain
+#        Aliases:
+#          - !Ref HostedZoneDomain
         Origins:
-          - DomainName: cloudfront-file-store
+          - DomainName: !GetAtt CloudFrontBucket.DomainName
             Id: bucketOrigin
             S3OriginConfig:
               OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
         Enabled: true
         HttpVersion: http2
         DefaultRootObject: index.html
-        ViewerCertificate:
-          AcmCertificateArn: !Ref CloudFrontTlsCertificate
-          MinimumProtocolVersion: "TLSv1.2_2018"
-          SslSupportMethod: "sni-only"
+        DefaultCacheBehavior:
+          # from https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 
+          TargetOriginId: bucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+#        ViewerCertificate:
+#          AcmCertificateArn: !Ref CloudFrontTlsCertificate
+#          MinimumProtocolVersion: "TLSv1.2_2018"
+#          SslSupportMethod: "sni-only"
 
   ################### CodeBuild ###################
 
@@ -110,10 +117,28 @@ Resources:
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              Effect: Allow
-              Action:
-                - cloudfront:CreateInvalidation
-              Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+        - PolicyName: CloudWatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: "*"
+        - PolicyName: S3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:* #Todo: Replace least needed
+                Resource: !Sub
+                  - ${BUCKET}/*
+                  - BUCKET: !GetAtt CodePipelineArtifactStoreBucket.Arn 
 
   CodeBuild:
     Type: AWS::CodeBuild::Project
@@ -124,7 +149,7 @@ Resources:
       Source:
         Type: CODEPIPELINE
         BuildSpec: ./buildspec.yaml
-      Name: CloudFront Deployment
+      Name: CloudFrontDeployment
       Description: builds the frontend and deploys it S3
       Environment:
         Type: LINUX_CONTAINER
@@ -141,7 +166,7 @@ Resources:
   CodePipelineArtifactStoreBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: codepipeline-artifact-store
+      BucketName: some-random-string-of-characters-codepipeline-artifact-store
 
   CodePipelineRole:
     DependsOn: CloudFrontBucket
@@ -165,8 +190,18 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - "s3:*" #Todo: Replace least needed
-                Resource: !GetAtt CloudFrontBucket.Arn
+                  - s3:* #Todo: Replace least needed
+                Resource: !Sub
+                  - ${BUCKET}/*
+                  - BUCKET: !GetAtt CodePipelineArtifactStoreBucket.Arn
+        - PolicyName: CodeBuild
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuild.Arn
 
   ProjectPipeline:
     Type: AWS::CodePipeline::Pipeline
@@ -176,7 +211,7 @@ Resources:
       RestartExecutionOnUpdate: true
       ArtifactStore:
         Type: S3
-        Location: !ImportValue Gingersnap-CodePipeline-Bucket
+        Location: !Ref CodePipelineArtifactStoreBucket
       Stages:
         - Name: Source
           Actions:
@@ -189,13 +224,14 @@ Resources:
               OutputArtifacts:
                 - Name: SourceOutput
               Configuration:
-                Branch: master
+                Branch: main
                 Owner: frctnlss
                 Repo: SRE-Challenge
+                OAuthToken: 25035df6be4b85173d48fbd00f005bc2354ce72e
                 PollForSourceChanges: true
         - Name: Deploy
           Actions:
-            - Name: CloudFront Deployment
+            - Name: CloudFrontDeployment
               InputArtifacts:
                 - Name: SourceOutput
               ActionTypeId:
